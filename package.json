@@ -1,0 +1,9 @@
+{
+  "name": "kaiteku-work-time-app",
+  "private": true,
+  "version": "1.0.0",
+  "description": "カイテク就労時間管理アプリ（試作版・Netlify版）",
+  "dependencies": {
+    "@netlify/blobs": "^11.0.2"
+  }
+}
