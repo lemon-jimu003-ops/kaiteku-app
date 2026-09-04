@@ -462,7 +462,7 @@
       body += '<div class="alert alert-danger">前回の退勤から' + warnMin + '分しか経っていません。誤って読み取っていないかご確認のうえ、開始してください。</div>';
     }
     body += '<button class="btn btn-primary btn-xl" data-action="confirm-start" ' + (busy ? 'disabled' : '') + '>' + (busy ? '記録中…' : '勤務開始') + '</button>';
-    return screenChrome(body, { title: '勤務開始', onBack: 'w_home', steps: ['開始', 'ユニット', '仕事内容'], stepIndex: 0 });
+    return screenChrome(body, { title: '勤務開始', onBack: 'w_home', steps: ['開始', 'ユニット'], stepIndex: 0 });
   }
 
   function checkboxGrid(items, selected, name) {
@@ -479,9 +479,9 @@
     var body = '<p class="hint">勤務するユニットを選択してください（複数選択可）。</p>' +
       '<form data-action="save-units">' +
       checkboxGrid(units, session.draft.selectedUnits, 'unit') +
-      '<button type="submit" class="btn btn-primary btn-xl">次へ</button>' +
+      '<button type="submit" class="btn btn-primary btn-xl">この内容で勤務を開始する</button>' +
       '</form>';
-    return screenChrome(body, { title: 'ユニット選択', onBack: 'w_home', steps: ['開始', 'ユニット', '仕事内容'], stepIndex: 1 });
+    return screenChrome(body, { title: 'ユニット選択', onBack: 'w_home', steps: ['開始', 'ユニット'], stepIndex: 1 });
   }
 
   function renderWorkerJob(staff) {
@@ -492,9 +492,9 @@
       checkboxGrid(jobs, session.draft.selectedJobs, 'job') +
       '<label class="field other-field' + (otherSelected ? '' : ' is-hidden') + '"><span>その他の内容</span>' +
       '<input type="text" name="jobOther" maxlength="80" placeholder="具体的な内容を入力してください" value="' + escapeHtml(session.draft.jobOtherText) + '"></label>' +
-      '<button type="submit" class="btn btn-primary btn-xl">この内容で勤務を開始する</button>' +
+      '<button type="submit" class="btn btn-primary btn-xl">次へ</button>' +
       '</form>';
-    return screenChrome(body, { title: '仕事内容選択', onBack: 'w_home', steps: ['開始', 'ユニット', '仕事内容'], stepIndex: 2 });
+    return screenChrome(body, { title: '仕事内容選択', onBack: 'w_home', steps: ['仕事内容', '休憩', '確認'], stepIndex: 0 });
   }
 
   function renderWorkerEnd(staff) {
@@ -509,7 +509,7 @@
         return '<option value="' + m + '"' + (session.draft.breakMinutes === m ? ' selected' : '') + '>' + m + '分</option>';
       }).join('') + '</select></label>' +
       '<button class="btn btn-primary btn-xl" data-action="confirm-end">勤務終了</button>';
-    return screenChrome(body, { title: '勤務終了', onBack: 'w_home' });
+    return screenChrome(body, { title: '勤務終了', onBack: 'w_job', steps: ['仕事内容', '休憩', '確認'], stepIndex: 1 });
   }
 
   function renderWorkerConfirm(staff) {
@@ -526,12 +526,12 @@
       summaryRow('終業時間', fmtTime(endAt)) +
       summaryRow('休憩時間', session.draft.breakMinutes + '分') +
       summaryRow('実働時間', fmtDuration(workedMinutes) + '（' + fmtDecimalHours(workedMinutes) + '）') +
-      summaryRow('勤務ユニット', unitNames(session.draft.selectedUnits).join('、') || '―') +
+      summaryRow('勤務ユニット', unitNames(rec.units).join('、') || '―') +
       summaryRow('仕事内容', jobs.join('、') || '―') +
       '</div>' +
       (workedMinutes < 0 ? '<div class="alert alert-danger">終業時間が始業時間より前になっています。もう一度お試しいただくか、管理者にご連絡ください。</div>' : '') +
       '<button class="btn btn-primary btn-xl" data-action="finalize-end" ' + (busy || workedMinutes < 0 ? 'disabled' : '') + '>' + (busy ? '保存中…' : '勤務終了を確定する') + '</button>';
-    return screenChrome(body, { title: '勤務確認', onBack: 'w_home' });
+    return screenChrome(body, { title: '勤務確認', onBack: 'w_end', steps: ['仕事内容', '休憩', '確認'], stepIndex: 2 });
   }
 
   function summaryRow(label, value) {
@@ -1192,7 +1192,7 @@
         session.draft.qrAction = mode;
         if (mode === 'checkout') {
           var rec = activeOnDutyRecord(session.staffId);
-          session.draft.targetRecordId = rec ? rec.id : null;
+          session.draft.targetRecordId = rec ? rec.id : null; session.draft.selectedJobs = []; session.draft.jobOtherText = ''; session.draft.breakMinutes = 0; session.draft.endAt = null;
         }
         go('w_qr');
       });
@@ -1205,7 +1205,7 @@
       setTimeout(function () {
         setBusy(false);
         if (session.draft.qrAction === 'checkin') go('w_start');
-        else go('w_end');
+        else go('w_job');
       }, 550);
     });
 
@@ -1235,7 +1235,7 @@
       var checked = Array.from(unitForm.querySelectorAll('input[name="unit"]:checked')).map(function (el) { return el.value; });
       if (!checked.length) { showToast('ユニットを1つ以上選択してください。', 'warn'); return; }
       session.draft.selectedUnits = checked;
-      go('w_job');
+      var recId = session.draft.targetRecordId; mutateAndPublish(function (draft) { var rec = draft.records.find(function (r) { return r.id === recId; }); if (rec) { rec.units = checked; } }, { after: function (res) { if (!res.ok) return; showToast('勤務を開始しました。', 'success'); go('w_home'); } });
     });
 
     root.querySelectorAll('.checkbox-item input[name="unit"], .checkbox-item input[name="job"]').forEach(function (el) {
@@ -1260,17 +1260,7 @@
       if (otherJob && checked.indexOf(otherJob.id) !== -1 && !otherText) { showToast('「その他」の内容を入力してください。', 'warn'); return; }
       session.draft.selectedJobs = checked;
       session.draft.jobOtherText = otherText;
-      var staffId = session.staffId, recId = session.draft.targetRecordId;
-      mutateAndPublish(function (draft) {
-        var rec = draft.records.find(function (r) { return r.id === recId; });
-        if (rec) { rec.units = session.draft.selectedUnits.slice(); rec.jobs = checked; rec.jobOther = otherText; }
-      }, {
-        after: function (res) {
-          if (!res.ok) return;
-          showToast('勤務ユニット・仕事内容を記録しました。', 'success');
-          go('w_home');
-        }
-      });
+      go('w_end');
     });
 
     var breakSel = root.querySelector('[data-action="set-break"]');
@@ -1288,7 +1278,7 @@
       var recId = session.draft.targetRecordId;
       var endAt = session.draft.endAt || toJSTISOString(nowDate());
       var breakMin = session.draft.breakMinutes;
-      var units = session.draft.selectedUnits.slice();
+      ;
       var jobs = session.draft.selectedJobs.slice();
       var jobOther = session.draft.jobOtherText;
       mutateAndPublish(function (draft) {
@@ -1296,7 +1286,7 @@
         if (!rec) return;
         var workedMinutes = Math.round((new Date(endAt) - new Date(rec.startAt)) / 60000) - breakMin;
         rec.endAt = endAt; rec.breakMinutes = breakMin; rec.workedMinutes = workedMinutes;
-        rec.units = units; rec.jobs = jobs; rec.jobOther = jobOther; rec.status = 'completed';
+        rec.jobs = jobs; rec.jobOther = jobOther; rec.status = 'completed';
         rec.flags = computeEndFlags(rec, endAt, workedMinutes);
       }, {
         successMsg: '勤務終了を記録しました。お疲れ様でした。',
