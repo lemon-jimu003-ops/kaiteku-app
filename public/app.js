@@ -829,7 +829,10 @@
       '<td>' + escapeHtml(unitNames(r.units).join('、')) + '</td>' +
       '<td>' + escapeHtml(jobs) + '</td>' +
       '<td>' + flagTags + (r.corrections && r.corrections.length ? '<span class="flag-badge flag-neutral">修正済</span>' : '') + '</td>' +
-      '<td>' + (r.status === 'completed' ? '<button class="btn btn-small" data-action="edit-record" data-id="' + r.id + '">修正</button>' : '<span class="muted">―</span>') + '</td>' +
+      '<td class="row-actions">' +
+      (r.status === 'completed' ? '<button class="btn btn-small" data-action="edit-record" data-id="' + r.id + '">修正</button>' : '') +
+      '<button class="btn btn-small btn-danger-ghost" data-action="delete-record" data-id="' + r.id + '">削除</button>' +
+      '</td>' +
       '</tr>';
   }
 
@@ -839,6 +842,7 @@
     html += '<div class="table-toolbar"><span>' + list.length + '件</span><button class="btn btn-ghost" data-action="goto-export">この条件でExcel出力</button></div>';
     html += recordsTable(list);
     html += renderEditModal();
+    html += renderRecordDeleteModal();
     return html;
   }
 
@@ -879,6 +883,23 @@
       '</form></div></div>';
   }
 
+  function renderRecordDeleteModal() {
+    var id = session.deletingRecordId;
+    if (!id) return '';
+    var r = DB.records.find(function (x) { return x.id === id; });
+    if (!r) return '';
+    var st = findStaff(r.staffId);
+    var timeRange = fmtTime(r.startAt) + '〜' + (r.status === 'on_duty' ? '（勤務中）' : fmtTime(r.endAt));
+    return '<div class="modal-overlay" data-action="close-record-delete-modal"><div class="modal" data-stop-close>' +
+      '<h2>勤務記録を削除 — ' + escapeHtml(st ? st.name : '') + '（' + escapeHtml(fmtDateShort(r.date)) + '）</h2>' +
+      '<p>' + escapeHtml(timeRange) + ' の勤務記録を削除します。この操作は取り消せません。</p>' +
+      '<div class="modal-actions">' +
+      '<button type="button" class="btn btn-ghost" data-action="close-record-delete-modal">キャンセル</button>' +
+      '<button type="button" class="btn btn-danger" data-action="confirm-delete-record" data-id="' + id + '" ' + (busy ? 'disabled' : '') + '>削除する</button>' +
+      '</div>' +
+      '</div></div>';
+  }
+
   /* --- 個人別集計 --- */
   function renderAdminPersonal() {
     var staffId = session.summary.staffId || (DB.staff[0] && DB.staff[0].id) || '';
@@ -907,6 +928,8 @@
     html += '</div>';
 
     html += '<section class="panel"><h2>勤務履歴</h2>' + recordsTable(recs) + '</section>';
+    html += renderEditModal();
+    html += renderRecordDeleteModal();
     return html;
   }
 
@@ -1276,7 +1299,7 @@
       el.addEventListener('click', function () { go(el.getAttribute('data-go')); });
     });
     root.querySelectorAll('[data-go-admin]').forEach(function (el) {
-      el.addEventListener('click', function () { session.editingRecordId = null; session.editingStaffId = null; goAdmin(el.getAttribute('data-go-admin')); });
+      el.addEventListener('click', function () { session.editingRecordId = null; session.editingStaffId = null; session.deletingRecordId = null; goAdmin(el.getAttribute('data-go-admin')); });
     });
 
     var loginTabBtns = root.querySelectorAll('[data-action="set-login-tab"]');
@@ -1527,6 +1550,27 @@
       });
     });
 
+    root.querySelectorAll('[data-action="delete-record"]').forEach(function (el) {
+      el.addEventListener('click', function () { session.deletingRecordId = el.getAttribute('data-id'); saveSession(); render(); });
+    });
+    root.querySelectorAll('[data-action="close-record-delete-modal"]').forEach(function (el) {
+      el.addEventListener('click', function (ev) {
+        if (ev.target !== el) return;
+        session.deletingRecordId = null; saveSession(); render();
+      });
+    });
+    var confirmDeleteRecordBtn = root.querySelector('[data-action="confirm-delete-record"]');
+    if (confirmDeleteRecordBtn) confirmDeleteRecordBtn.addEventListener('click', function () {
+      var id = confirmDeleteRecordBtn.getAttribute('data-id');
+      mutateAndPublish(function (draft) {
+        var idx = draft.records.findIndex(function (r) { return r.id === id; });
+        if (idx !== -1) draft.records.splice(idx, 1);
+      }, {
+        successMsg: '勤務記録を削除しました。',
+        after: function (res) { if (!res.ok) return; session.deletingRecordId = null; saveSession(); render(); }
+      });
+    });
+
     /* ---- 管理者：集計フィルタ ---- */
     var staffSel = root.querySelector('[data-action="set-summary-staff"]');
     if (staffSel) staffSel.addEventListener('change', function () { session.summary.staffId = staffSel.value; saveSession(); render(); });
@@ -1764,7 +1808,7 @@
 
   /* ---------------------------- サーバーからの自動更新（他端末の反映） ---------------------------- */
   function hasOpenEditor() {
-    return !!(session.editingStaffId || session.editingRecordId || session.deletingStaffId ||
+    return !!(session.editingStaffId || session.editingRecordId || session.deletingStaffId || session.deletingRecordId ||
       (session.staffImport && session.staffImport.stage));
   }
 
