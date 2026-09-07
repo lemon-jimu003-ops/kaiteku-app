@@ -24,6 +24,13 @@
   var session = null;
   var busy = false;
   var toastTimer = null;
+  var qrStream = null;
+  var qrRafId = null;
+  var qrStarting = false;
+  var qrCanvas = null;
+  var qrCtx = null;
+  var qrLastErrorText = null;
+  var qrLastErrorAt = 0;
   var clockTimer = null;
   var pollTimer = null;
   var API_BASE = '/api';
@@ -236,6 +243,7 @@
     setBusy(false);
     if (res.ok) {
       DB = draft;
+      if (opts.beforeRender) opts.beforeRender(draft);
       render();
       if (opts.successMsg) showToast(opts.successMsg, 'success');
     } else {
@@ -299,6 +307,124 @@
     }
     root.innerHTML = '<div class="toast-layer">' + renderToast() + '</div>' + html;
     bindGlobalActions(root);
+    if (session.role === 'worker' && session.screen === 'w_qr') {
+      ensureQrCamera();
+    } else {
+      stopQrCamera();
+    }
+  }
+
+  /* ---------------------------- QRカメラ読み取り ---------------------------- */
+  function setQrStatus(msg, tone) {
+    var el = document.getElementById('qr-status');
+    if (el) { el.textContent = msg; el.className = 'qr-status' + (tone ? ' qr-status-' + tone : ''); }
+  }
+
+  function stopQrCamera() {
+    if (qrRafId) { cancelAnimationFrame(qrRafId); qrRafId = null; }
+    if (qrStream) {
+      qrStream.getTracks().forEach(function (t) { t.stop(); });
+      qrStream = null;
+    }
+    qrStarting = false;
+  }
+
+  function ensureQrCamera() {
+    var video = document.getElementById('qr-video');
+    if (!video) return;
+    if (qrStream) {
+      if (video.srcObject !== qrStream) { video.srcObject = qrStream; video.play().catch(function () {}); }
+      if (!qrRafId) { qrRafId = requestAnimationFrame(qrScanFrame); }
+      return;
+    }
+    if (qrStarting) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setQrStatus('このブラウザではカメラを利用できません。ブラウザを最新版に更新するか、別のブラウザでお試しください。', 'warn');
+      return;
+    }
+    qrStarting = true;
+    setQrStatus('カメラを起動しています…');
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false })
+      .then(function (stream) {
+        qrStarting = false;
+        if (session.screen !== 'w_qr') { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+        var v = document.getElementById('qr-video');
+        if (!v) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+        qrStream = stream;
+        v.srcObject = stream;
+        v.play().catch(function () {});
+        setQrStatus('QRコードを枠内に合わせてください');
+        qrRafId = requestAnimationFrame(qrScanFrame);
+      })
+      .catch(function (err) {
+        qrStarting = false;
+        var msg = 'カメラを起動できませんでした。もう一度お試しください。';
+        var name = err && err.name;
+        if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
+          msg = 'カメラへのアクセスが許可されていません。ブラウザの設定でこのサイトのカメラ利用を許可してから、もう一度お試しください。';
+        } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+          msg = 'カメラが見つかりませんでした。この端末では読み取りができません。';
+        } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+          msg = '他のアプリがカメラを使用中の可能性があります。他のカメラアプリを閉じてから、もう一度お試しください。';
+        }
+        setQrStatus(msg, 'warn');
+      });
+  }
+
+  function qrScanFrame() {
+    qrRafId = null;
+    if (session.screen !== 'w_qr') { stopQrCamera(); return; }
+    var video = document.getElementById('qr-video');
+    if (!video || !qrStream || video.readyState !== video.HAVE_ENOUGH_DATA) {
+      qrRafId = requestAnimationFrame(qrScanFrame);
+      return;
+    }
+    var w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) { qrRafId = requestAnimationFrame(qrScanFrame); return; }
+    if (!qrCanvas) { qrCanvas = document.createElement('canvas'); qrCtx = qrCanvas.getContext('2d', { willReadFrequently: true }); }
+    qrCanvas.width = w; qrCanvas.height = h;
+    qrCtx.drawImage(video, 0, 0, w, h);
+    var imgData = null;
+    try { imgData = qrCtx.getImageData(0, 0, w, h); } catch (e) { /* ignore */ }
+    var code = null;
+    if (imgData && window.jsQR) {
+      try { code = window.jsQR(imgData.data, w, h, { inversionAttempts: 'dontInvert' }); } catch (e) { code = null; }
+    }
+    if (code && code.data) { handleQrDetected(code.data); }
+    if (session.screen === 'w_qr') { qrRafId = requestAnimationFrame(qrScanFrame); }
+  }
+
+  function handleQrDetected(text) {
+    var now = Date.now();
+    var expectedKind = session.draft.qrAction;
+    var m = /^KAITEKU:(CHECKIN|CHECKOUT):(.+)$/.exec(text);
+    if (!m) {
+      if (qrLastErrorText === text && (now - qrLastErrorAt) < 1500) return;
+      qrLastErrorText = text; qrLastErrorAt = now;
+      setQrStatus('認識できないQRコードです。施設に設置されている出勤・退勤用のQRコードを読み取ってください。', 'warn');
+      return;
+    }
+    var scannedKind = m[1] === 'CHECKIN' ? 'checkin' : 'checkout';
+    var scannedToken = m[2];
+    if (scannedKind !== expectedKind) {
+      var key = 'kind:' + scannedKind;
+      if (qrLastErrorText === key && (now - qrLastErrorAt) < 1500) return;
+      qrLastErrorText = key; qrLastErrorAt = now;
+      setQrStatus(expectedKind === 'checkin' ? '退勤用のQRコードが読み取られました。出勤用のQRコードを読み取ってください。' : '出勤用のQRコードが読み取られました。退勤用のQRコードを読み取ってください。', 'warn');
+      return;
+    }
+    var expectedToken = DB.qr[expectedKind] && DB.qr[expectedKind].token;
+    if (!expectedToken || scannedToken !== expectedToken) {
+      if (qrLastErrorText === 'invalid' && (now - qrLastErrorAt) < 1500) return;
+      qrLastErrorText = 'invalid'; qrLastErrorAt = now;
+      setQrStatus('このQRコードは無効です（更新されている可能性があります）。管理者にご確認ください。', 'warn');
+      return;
+    }
+    stopQrCamera();
+    setQrStatus('読み取りました。', 'ok');
+    setTimeout(function () {
+      if (expectedKind === 'checkin') go('w_start'); else go('w_job');
+    }, 350);
   }
 
   function renderToast() {
@@ -444,10 +570,11 @@
     var mode = session.draft.qrAction;
     var label = mode === 'checkin' ? '出勤用QRコード' : '退勤用QRコード';
     var body = '<p class="qr-instruction">施設に設置されている「' + label + '」にスマートフォンのカメラをかざしてください。</p>' +
-      '<div class="qr-viewfinder" aria-hidden="true"><span class="corner c-tl"></span><span class="corner c-tr"></span><span class="corner c-bl"></span><span class="corner c-br"></span>' +
-      '<span class="qr-scan-icon">▦</span></div>' +
-      '<button class="btn btn-primary btn-xl" data-action="simulate-scan" ' + (busy ? 'disabled' : '') + '>' + (busy ? '読み取り中…' : 'QRコードを読み取る（試作版）') + '</button>' +
-      '<p class="hint center">実機では実際のQRコードをスキャンします。この試作版ではボタン操作で代用します。</p>';
+      '<div class="qr-viewfinder" aria-hidden="true">' +
+      '<video id="qr-video" class="qr-video" autoplay playsinline muted></video>' +
+      '<span class="corner c-tl"></span><span class="corner c-tr"></span><span class="corner c-bl"></span><span class="corner c-br"></span>' +
+      '</div>' +
+      '<p id="qr-status" class="qr-status" role="status">カメラを起動しています…</p>';
     return screenChrome(body, { title: mode === 'checkin' ? '出勤QR読み取り' : '退勤QR読み取り', onBack: 'w_home' });
   }
 
@@ -555,8 +682,11 @@
       { key: 'jobtypes', label: '仕事内容管理' },
       { key: 'qr', label: 'QRコード管理' },
     ] },
+    { group: 'アカウント', items: [
+      { key: 'password', label: 'パスワード変更' },
+    ] },
   ];
-  var ADMIN_TITLES = { dashboard: 'ダッシュボード', records: '勤務実績一覧', personal: '個人別集計', unit: 'ユニット別集計', month: '月別集計', jobs: '仕事内容別集計', export: 'Excel出力', staff: 'スタッフ管理', units: 'ユニット管理', jobtypes: '仕事内容管理', qr: 'QRコード管理' };
+  var ADMIN_TITLES = { dashboard: 'ダッシュボード', records: '勤務実績一覧', personal: '個人別集計', unit: 'ユニット別集計', month: '月別集計', jobs: '仕事内容別集計', export: 'Excel出力', staff: 'スタッフ管理', units: 'ユニット管理', jobtypes: '仕事内容管理', qr: 'QRコード管理', password: 'パスワード変更' };
 
   function renderAdmin() {
     var admin = DB.admins.find(function (a) { return a.username === session.adminUser; });
@@ -573,6 +703,7 @@
       case 'units': content = renderAdminUnits(); break;
       case 'jobtypes': content = renderAdminJobTypes(); break;
       case 'qr': content = renderAdminQr(); break;
+      case 'password': content = renderAdminPassword(); break;
       default: content = renderAdminDashboard();
     }
     var navHtml = ADMIN_NAV.map(function (grp) {
@@ -1110,6 +1241,23 @@
     return html;
   }
 
+  /* --- パスワード変更 --- */
+  function renderAdminPassword() {
+    var admin = DB.admins.find(function (a) { return a.username === session.adminUser; });
+    var body = '<section class="panel">' +
+      '<h2>ログイン情報の変更</h2>' +
+      '<p class="hint">現在のパスワードを入力すると、ユーザー名とパスワードを変更できます。忘れてしまった場合は、開発者にDBの初期値の確認を依頼してください。</p>' +
+      '<form data-action="change-admin-password">' +
+      '<label class="field"><span>現在のパスワード</span><input type="password" name="currentPassword" autocomplete="current-password" required></label>' +
+      '<label class="field"><span>新しいユーザー名</span><input type="text" name="newUsername" autocomplete="username" required value="' + escapeHtml(admin ? admin.username : '') + '"></label>' +
+      '<label class="field"><span>新しいパスワード</span><input type="password" name="newPassword" autocomplete="new-password" required minlength="4" placeholder="4文字以上"></label>' +
+      '<label class="field"><span>新しいパスワード（確認）</span><input type="password" name="newPasswordConfirm" autocomplete="new-password" required minlength="4"></label>' +
+      '<button type="submit" class="btn btn-primary btn-lg" ' + (busy ? 'disabled' : '') + '>' + (busy ? '更新中…' : 'パスワードを更新する') + '</button>' +
+      '</form>' +
+      '</section>';
+    return body;
+  }
+
   /* ---------------------------- グローバル操作バインド ---------------------------- */
   function bindGlobalActions(root) {
     /* QRコード画像の描画 */
@@ -1178,6 +1326,34 @@
       go('a');
     });
 
+    var changePwForm = root.querySelector('[data-action="change-admin-password"]');
+    if (changePwForm) changePwForm.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      if (busy) return;
+      var fd = new FormData(changePwForm);
+      var currentPassword = fd.get('currentPassword') || '';
+      var newUsername = (fd.get('newUsername') || '').trim();
+      var newPassword = fd.get('newPassword') || '';
+      var newPasswordConfirm = fd.get('newPasswordConfirm') || '';
+      var adminUsername = session.adminUser;
+      var admin = DB.admins.find(function (a) { return a.username === adminUsername; });
+      if (!admin) { showToast('管理者情報が見つかりません。', 'danger'); return; }
+      if (admin.password !== currentPassword) { showToast('現在のパスワードが正しくありません。', 'danger'); return; }
+      if (!newUsername) { showToast('新しいユーザー名を入力してください。', 'warn'); return; }
+      if (newUsername !== admin.username && DB.admins.some(function (a) { return a.username === newUsername; })) {
+        showToast('そのユーザー名は既に使用されています。', 'warn'); return;
+      }
+      if (newPassword.length < 4) { showToast('新しいパスワードは4文字以上で入力してください。', 'warn'); return; }
+      if (newPassword !== newPasswordConfirm) { showToast('新しいパスワード（確認）が一致しません。', 'warn'); return; }
+      mutateAndPublish(function (draft) {
+        var a = draft.admins.find(function (x) { return x.username === adminUsername; });
+        if (a) { a.username = newUsername; a.password = newPassword; }
+      }, {
+        beforeRender: function () { session.adminUser = newUsername; saveSession(); },
+        successMsg: '次回のログインから新しいユーザー名・パスワードでログインしてください。'
+      });
+    });
+
     root.querySelectorAll('[data-action="logout"]').forEach(function (el) {
       el.addEventListener('click', function () {
         session.role = null; session.staffId = null; session.adminUser = null; session.screen = 'login';
@@ -1198,16 +1374,6 @@
       });
     });
 
-    var scanBtn = root.querySelector('[data-action="simulate-scan"]');
-    if (scanBtn) scanBtn.addEventListener('click', function () {
-      if (busy) return;
-      setBusy(true); render();
-      setTimeout(function () {
-        setBusy(false);
-        if (session.draft.qrAction === 'checkin') go('w_start');
-        else go('w_job');
-      }, 550);
-    });
 
     var startBtn = root.querySelector('[data-action="confirm-start"]');
     if (startBtn) startBtn.addEventListener('click', function () {
