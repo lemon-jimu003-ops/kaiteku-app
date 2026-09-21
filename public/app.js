@@ -831,7 +831,7 @@
       '<td>' + flagTags + (r.corrections && r.corrections.length ? '<span class="flag-badge flag-neutral">修正済</span>' : '') + '</td>' +
       '<td class="row-actions">' +
       (r.status === 'completed' ? '<button class="btn btn-small" data-action="edit-record" data-id="' + r.id + '">修正</button>' : '') +
-      '<button class="btn btn-small btn-danger-ghost" data-action="delete-record" data-id="' + r.id + '">削除</button>' +
+      (opts.allowDelete ? '<button class="btn btn-small btn-danger-ghost" data-action="delete-record" data-id="' + r.id + '">削除</button>' : '') +
       '</td>' +
       '</tr>';
   }
@@ -842,15 +842,15 @@
     html += '<div class="table-toolbar"><span>' + list.length + '件</span><button class="btn btn-ghost" data-action="goto-export">この条件でExcel出力</button></div>';
     html += recordsTable(list);
     html += renderEditModal();
-    html += renderRecordDeleteModal();
     return html;
   }
 
-  function recordsTable(list) {
+  function recordsTable(list, opts) {
+    opts = opts || {};
     if (!list.length) return '<p class="empty">条件に一致する記録がありません。</p>';
     return '<div class="table-wrap"><table class="data-table"><thead><tr>' +
       '<th>日付</th><th>スタッフ番号</th><th>氏名</th><th>始業</th><th>終業</th><th>実働</th><th>ユニット</th><th>仕事内容</th><th>状態</th><th></th>' +
-      '</tr></thead><tbody>' + list.map(function (r) { return recordRowHtml(r); }).join('') + '</tbody></table></div>';
+      '</tr></thead><tbody>' + list.map(function (r) { return recordRowHtml(r, opts); }).join('') + '</tbody></table></div>';
   }
 
   function renderEditModal() {
@@ -927,10 +927,38 @@
     html += '<section class="panel"><h2>仕事内容別内訳</h2>' + breakdownList(jobCount, findJob) + '</section>';
     html += '</div>';
 
-    html += '<section class="panel"><h2>勤務履歴</h2>' + recordsTable(recs) + '</section>';
+    html += '<section class="panel"><h2>勤務履歴</h2>' +
+      '<div class="table-toolbar"><span>誤って削除した記録は、こちらから追加して復元できます。</span><button class="btn btn-primary" data-action="add-record" ' + (busy ? 'disabled' : '') + '>＋ 記録を追加</button></div>' +
+      recordsTable(recs, { allowDelete: true }) + '</section>';
     html += renderEditModal();
     html += renderRecordDeleteModal();
+    html += renderAddRecordModal();
     return html;
+  }
+
+  function renderAddRecordModal() {
+    var staffId = session.addingRecordStaffId;
+    if (!staffId) return '';
+    var st = findStaff(staffId);
+    if (!st) return '';
+    var mk = session.summary.month;
+    var defaultDate = mk + '-01';
+    return '<div class="modal-overlay" data-action="close-add-record-modal"><div class="modal" data-stop-close>' +
+      '<h2>勤務記録を追加 — ' + escapeHtml(st.name) + '</h2>' +
+      '<p class="hint">誤って削除してしまった記録の復元など、管理者が手動で記録を追加する場合にご利用ください。</p>' +
+      '<form data-action="save-new-record">' +
+      '<div class="modal-grid">' +
+      '<label class="field"><span>始業日</span><input type="date" name="startDate" value="' + defaultDate + '" required></label>' +
+      '<label class="field"><span>始業時刻</span><input type="time" name="startTime" value="09:00" required></label>' +
+      '<label class="field"><span>終業日</span><input type="date" name="endDate" value="' + defaultDate + '" required></label>' +
+      '<label class="field"><span>終業時刻</span><input type="time" name="endTime" value="17:00" required></label>' +
+      '<label class="field"><span>休憩時間（分）</span><input type="number" name="breakMinutes" min="0" step="5" value="0" required></label>' +
+      '<label class="field checkbox-inline"><input type="checkbox" name="reviewed" checked><span>確認済みにする</span></label>' +
+      '</div>' +
+      '<label class="field"><span>ユニット</span></label>' + checkboxGrid(DB.units.filter(function (u) { return u.active; }), [], 'units') +
+      '<label class="field"><span>仕事内容</span></label>' + checkboxGrid(DB.jobTypes.filter(function (j) { return j.active; }), [], 'jobs') +
+      '<div class="modal-actions"><button type="button" class="btn btn-ghost" data-action="close-add-record-modal">キャンセル</button><button type="submit" class="btn btn-primary" ' + (busy ? 'disabled' : '') + '>' + (busy ? '保存中…' : '追加する') + '</button></div>' +
+      '</form></div></div>';
   }
 
   function breakdownList(counts, resolver) {
@@ -1299,7 +1327,7 @@
       el.addEventListener('click', function () { go(el.getAttribute('data-go')); });
     });
     root.querySelectorAll('[data-go-admin]').forEach(function (el) {
-      el.addEventListener('click', function () { session.editingRecordId = null; session.editingStaffId = null; session.deletingRecordId = null; goAdmin(el.getAttribute('data-go-admin')); });
+      el.addEventListener('click', function () { session.editingRecordId = null; session.editingStaffId = null; session.deletingRecordId = null; session.addingRecordStaffId = null; goAdmin(el.getAttribute('data-go-admin')); });
     });
 
     var loginTabBtns = root.querySelectorAll('[data-action="set-login-tab"]');
@@ -1571,6 +1599,43 @@
       });
     });
 
+    var addRecordBtn = root.querySelector('[data-action="add-record"]');
+    if (addRecordBtn) addRecordBtn.addEventListener('click', function () {
+      session.addingRecordStaffId = session.summary.staffId; saveSession(); render();
+    });
+    root.querySelectorAll('[data-action="close-add-record-modal"]').forEach(function (el) {
+      el.addEventListener('click', function (ev) {
+        if (ev.target !== el) return;
+        session.addingRecordStaffId = null; saveSession(); render();
+      });
+    });
+    var newRecordForm = root.querySelector('[data-action="save-new-record"]');
+    if (newRecordForm) newRecordForm.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      if (busy) return;
+      var staffId = session.addingRecordStaffId;
+      if (!staffId || !findStaff(staffId)) { showToast('スタッフが見つかりません。', 'danger'); return; }
+      var fd = new FormData(newRecordForm);
+      var newStart = fd.get('startDate') + 'T' + fd.get('startTime') + ':00+09:00';
+      var newEnd = fd.get('endDate') + 'T' + fd.get('endTime') + ':00+09:00';
+      var newBreak = parseInt(fd.get('breakMinutes'), 10) || 0;
+      var reviewed = !!fd.get('reviewed');
+      var units = Array.from(newRecordForm.querySelectorAll('input[name="units"]:checked')).map(function (x) { return x.value; });
+      var jobs = Array.from(newRecordForm.querySelectorAll('input[name="jobs"]:checked')).map(function (x) { return x.value; });
+      if (new Date(newEnd) <= new Date(newStart)) { showToast('終業時刻は始業時刻より後にしてください。', 'danger'); return; }
+      var workedMinutes = Math.round((new Date(newEnd) - new Date(newStart)) / 60000) - newBreak;
+      if (workedMinutes < 0) { showToast('休憩時間が長すぎます。', 'danger'); return; }
+      var newId = uid('R');
+      var startFlags = computeStartFlags(staffId, newStart);
+      var flags = computeEndFlags({ flags: startFlags }, newEnd, workedMinutes);
+      mutateAndPublish(function (draft) {
+        draft.records.push({ id: newId, staffId: staffId, date: newStart.slice(0, 10), startAt: newStart, endAt: newEnd, breakMinutes: newBreak, workedMinutes: workedMinutes, units: units, jobs: jobs, jobOther: '', status: 'completed', flags: flags, reviewed: reviewed, corrections: [] });
+      }, {
+        successMsg: '勤務記録を追加しました。',
+        after: function (res) { if (!res.ok) return; session.addingRecordStaffId = null; saveSession(); render(); }
+      });
+    });
+
     /* ---- 管理者：集計フィルタ ---- */
     var staffSel = root.querySelector('[data-action="set-summary-staff"]');
     if (staffSel) staffSel.addEventListener('change', function () { session.summary.staffId = staffSel.value; saveSession(); render(); });
@@ -1808,7 +1873,7 @@
 
   /* ---------------------------- サーバーからの自動更新（他端末の反映） ---------------------------- */
   function hasOpenEditor() {
-    return !!(session.editingStaffId || session.editingRecordId || session.deletingStaffId || session.deletingRecordId ||
+    return !!(session.editingStaffId || session.editingRecordId || session.deletingStaffId || session.deletingRecordId || session.addingRecordStaffId ||
       (session.staffImport && session.staffImport.stage));
   }
 
