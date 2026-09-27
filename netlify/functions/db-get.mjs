@@ -1,6 +1,9 @@
 // GET /api/db — returns the shared app data as JSON.
 // On first-ever call (empty store) it seeds the store from seed-data.mjs so
 // every device that opens the app afterwards sees the same starting data.
+// The response carries an ETag (see db-save.mjs) identifying this exact
+// version of the data, so the client can save back safely later with a
+// conditional write instead of blindly overwriting whatever is newest.
 import { getStore } from '@netlify/blobs';
 import seedData from './lib/seed-data.mjs';
 
@@ -10,16 +13,20 @@ const KEY = 'db';
 export default async () => {
   try {
     const store = getStore(STORE_NAME);
-    let data = await store.get(KEY, { type: 'json' });
+    let entry = await store.getWithMetadata(KEY, { type: 'json' });
+    let data = entry && entry.data;
+    let etag = entry && entry.etag;
     if (!data) {
       data = seedData;
-      await store.setJSON(KEY, data);
+      const seeded = await store.setJSON(KEY, data);
+      etag = seeded && seeded.etag;
     }
     return new Response(JSON.stringify(data), {
       status: 200,
       headers: {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
+        'etag': etag || '',
       },
     });
   } catch (err) {
