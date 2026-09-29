@@ -194,7 +194,10 @@
     var res = await fetch(API_BASE + '/db', { cache: 'no-store' });
     if (!res.ok) throw new Error('fetch failed: ' + res.status);
     var data = await res.json();
-    var etag = res.headers.get('etag');
+    /* Netlify's CDN rewrites the standard "ETag" response header in transit
+       (it appends a suffix, e.g. "-df"), so the server sends the real value
+       under a custom "X-Db-Etag" header instead — see db-get.mjs. */
+    var etag = res.headers.get('x-db-etag');
     return { data: data, etag: etag };
   }
 
