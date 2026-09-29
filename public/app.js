@@ -21,9 +21,11 @@
 
   /* ---------------------------- 状態 ---------------------------- */
   var DB = null;
-  /* DBを最後に取得した時点のETag。保存時にIf-Matchとして送ることで、
+  /* DBを最後に取得した時点のETag。保存時にX-If-Matchとして送ることで、
      他端末が先に保存していた場合はサーバー側で保存を拒否してもらう
-     （同時保存による打刻データの消失を防ぐ）。 */
+     （同時保存による打刻データの消失を防ぐ）。標準のIf-Matchヘッダーは
+     Netlifyのエッジ層でサーバーに届く前に除去されてしまうため、
+     カスタムヘッダー名（X-If-Match）を使用している。 */
   var DB_ETAG = null;
   var session = null;
   var busy = false;
@@ -227,7 +229,7 @@
   async function pushDb(newDb, etag) {
     try {
       var headers = { 'Content-Type': 'application/json' };
-      if (etag) headers['If-Match'] = etag;
+      if (etag) headers['X-If-Match'] = etag;
       var res = await fetch(API_BASE + '/db-save', {
         method: 'POST',
         headers: headers,
@@ -244,7 +246,7 @@
   }
 
   /* 同時保存で他端末の変更を消してしまわないよう、保存前に取得したETagを
-     If-Matchとして送る。サーバー側でETagが一致しなければ409が返るので、
+     X-If-Matchとして送る。サーバー側でETagが一致しなければ409が返るので、
      その場合は最新のDBを取得し直し、同じmutatorをもう一度適用して再試行
      する（IDはmutator呼び出し前に確定させているため、再適用は安全）。 */
   var MAX_ATTEMPTS = 4;
