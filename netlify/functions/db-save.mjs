@@ -13,6 +13,13 @@ const KEY = 'db';
 const REQUIRED_ARRAYS = ['staff', 'units', 'jobTypes', 'admins', 'records'];
 
 export default async (req) => {
+  var dbgUrl = new URL(req.url);
+  if (dbgUrl.searchParams.get('debug') === '1') {
+    return new Response(JSON.stringify({
+      ifMatchHeader: req.headers.get('if-match'),
+      allHeaders: Array.from(req.headers.entries()),
+    }), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
+  }
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'method_not_allowed' }), {
       status: 405,
