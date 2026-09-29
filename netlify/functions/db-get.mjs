@@ -4,6 +4,10 @@
 // The response carries an ETag (see db-save.mjs) identifying this exact
 // version of the data, so the client can save back safely later with a
 // conditional write instead of blindly overwriting whatever is newest.
+// The read uses strong consistency: Netlify Blobs' default (eventual)
+// consistency can serve a cached ETag for up to ~60 seconds after an
+// update, which would make every conditional save fail with 409 even
+// when nothing actually conflicts.
 import { getStore } from '@netlify/blobs';
 import seedData from './lib/seed-data.mjs';
 
@@ -13,7 +17,7 @@ const KEY = 'db';
 export default async () => {
   try {
     const store = getStore(STORE_NAME);
-    let entry = await store.getWithMetadata(KEY, { type: 'json' });
+    let entry = await store.getWithMetadata(KEY, { type: 'json', consistency: 'strong' });
     let data = entry && entry.data;
     let etag = entry && entry.etag;
     if (!data) {
