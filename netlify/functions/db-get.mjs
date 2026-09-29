@@ -8,6 +8,11 @@
 // consistency can serve a cached ETag for up to ~60 seconds after an
 // update, which would make every conditional save fail with 409 even
 // when nothing actually conflicts.
+// The ETag is carried in a custom "X-Db-Etag" header rather than the
+// standard "ETag" header, because Netlify's CDN rewrites (appends a
+// suffix to, e.g. "-df") the standard ETag response header in transit
+// — the client would never see the exact value Netlify Blobs actually
+// compares against on save, so every conditional write would fail.
 import { getStore } from '@netlify/blobs';
 import seedData from './lib/seed-data.mjs';
 
@@ -30,7 +35,7 @@ export default async () => {
       headers: {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',
-        'etag': etag || '',
+        'x-db-etag': etag || '',
       },
     });
   } catch (err) {
