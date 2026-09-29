@@ -1,10 +1,12 @@
 // POST /api/db-save — overwrites the shared app data with the JSON body.
 // Uses an optimistic-concurrency conditional write: the client must send
-// the ETag of the version it last read (as an If-Match header). If someone
-// else has saved in the meantime, the ETag no longer matches and this
-// write is rejected with 409 instead of silently overwriting their change
-// (the previous "last write wins" behavior could make an on-duty record
-// disappear when two people checked in/out within moments of each other).
+// the ETag of the version it last read (as an X-If-Match header — a custom
+// header name, because Netlify's edge strips the standard "If-Match"
+// header before it reaches this function). If someone else has saved in
+// the meantime, the ETag no longer matches and this write is rejected
+// with 409 instead of silently overwriting their change (the previous
+// "last write wins" behavior could make an on-duty record disappear when
+// two people checked in/out within moments of each other).
 // The client is expected to re-fetch and retry its change on conflict.
 import { getStore } from '@netlify/blobs';
 
@@ -13,13 +15,6 @@ const KEY = 'db';
 const REQUIRED_ARRAYS = ['staff', 'units', 'jobTypes', 'admins', 'records'];
 
 export default async (req) => {
-  var dbgUrl = new URL(req.url);
-  if (dbgUrl.searchParams.get('debug') === '1') {
-    return new Response(JSON.stringify({
-      ifMatchHeader: req.headers.get('if-match'),
-      allHeaders: Array.from(req.headers.entries()),
-    }), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
-  }
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'method_not_allowed' }), {
       status: 405,
@@ -43,7 +38,7 @@ export default async (req) => {
       headers: { 'content-type': 'application/json; charset=utf-8' },
     });
   }
-  var ifMatch = req.headers.get('if-match') || undefined;
+  var ifMatch = req.headers.get('x-if-match') || undefined;
   try {
     const store = getStore(STORE_NAME);
     const result = await store.setJSON(KEY, body, ifMatch ? { onlyIfMatch: ifMatch } : undefined);
