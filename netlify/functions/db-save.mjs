@@ -15,20 +15,6 @@ const KEY = 'db';
 const REQUIRED_ARRAYS = ['staff', 'units', 'jobTypes', 'admins', 'records'];
 
 export default async (req) => {
-  var dbgUrl = new URL(req.url);
-  if (dbgUrl.searchParams.get('debug') === '1') {
-    var clientEtag = req.headers.get('x-if-match');
-    var store0 = getStore(STORE_NAME);
-    var entryEventual = await store0.getWithMetadata(KEY, { type: 'json' });
-    var entryStrong = await store0.getWithMetadata(KEY, { type: 'json', consistency: 'strong' });
-    return new Response(JSON.stringify({
-      clientEtag: clientEtag,
-      eventualEtag: entryEventual && entryEventual.etag,
-      strongEtag: entryStrong && entryStrong.etag,
-      clientMatchesEventual: clientEtag === (entryEventual && entryEventual.etag),
-      clientMatchesStrong: clientEtag === (entryStrong && entryStrong.etag),
-    }), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } });
-  }
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'method_not_allowed' }), {
       status: 405,
