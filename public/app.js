@@ -21,6 +21,10 @@
 
   /* ---------------------------- 状態 ---------------------------- */
   var DB = null;
+  /* DBを最後に取得した時点のETag。保存時にIf-Matchとして送ることで、
+     他端末が先に保存していた場合はサーバー側で保存を拒否してもらう
+     （同時保存による打刻データの消失を防ぐ）。 */
+  var DB_ETAG = null;
   var session = null;
   var busy = false;
   var toastTimer = null;
@@ -187,7 +191,9 @@
   async function pullDb() {
     var res = await fetch(API_BASE + '/db', { cache: 'no-store' });
     if (!res.ok) throw new Error('fetch failed: ' + res.status);
-    return res.json();
+    var data = await res.json();
+    var etag = res.headers.get('etag');
+    return { data: data, etag: etag };
   }
 
   function cloneDb() { return JSON.parse(JSON.stringify(DB)); }
@@ -218,38 +224,69 @@
   /* ---------------------------- 保存（サーバーへ送信）まわり ---------------------------- */
   function setBusy(v) { busy = v; }
 
-  async function pushDb(newDb) {
+  async function pushDb(newDb, etag) {
     try {
+      var headers = { 'Content-Type': 'application/json' };
+      if (etag) headers['If-Match'] = etag;
       var res = await fetch(API_BASE + '/db-save', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: headers,
         body: JSON.stringify(newDb),
       });
+      if (res.status === 409) return { ok: false, code: 'conflict' };
       if (!res.ok) return { ok: false, code: 'server_error' };
-      return { ok: true };
+      var json = null;
+      try { json = await res.json(); } catch (e) { /* ignore */ }
+      return { ok: true, etag: json && json.etag };
     } catch (e) {
       return { ok: false, code: 'offline' };
     }
   }
 
+  /* 同時保存で他端末の変更を消してしまわないよう、保存前に取得したETagを
+     If-Matchとして送る。サーバー側でETagが一致しなければ409が返るので、
+     その場合は最新のDBを取得し直し、同じmutatorをもう一度適用して再試行
+     する（IDはmutator呼び出し前に確定させているため、再適用は安全）。 */
+  var MAX_ATTEMPTS = 4;
   async function mutateAndPublish(mutator, opts) {
     opts = opts || {};
-    var draft = cloneDb();
-    mutator(draft);
-    draft.meta.updatedAt = toJSTISOString(nowDate());
     setBusy(true);
     render();
-    var res = await pushDb(draft);
+    var res;
+    for (var attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      var draft = cloneDb();
+      mutator(draft);
+      draft.meta.updatedAt = toJSTISOString(nowDate());
+      res = await pushDb(draft, DB_ETAG);
+      if (res.ok) {
+        DB = draft;
+        DB_ETAG = res.etag || DB_ETAG;
+        break;
+      }
+      if (res.code === 'conflict' && attempt < MAX_ATTEMPTS) {
+        try {
+          var pulled = await pullDb();
+          DB = pulled.data;
+          DB_ETAG = pulled.etag;
+          continue;
+        } catch (e) {
+          res = { ok: false, code: 'offline' };
+          break;
+        }
+      }
+      break;
+    }
     setBusy(false);
     if (res.ok) {
-      DB = draft;
-      if (opts.beforeRender) opts.beforeRender(draft);
+      if (opts.beforeRender) opts.beforeRender(DB);
       render();
       if (opts.successMsg) showToast(opts.successMsg, 'success');
     } else {
       render();
       if (res.code === 'offline') {
         showToast('サーバーに接続できませんでした。通信環境をご確認のうえ、もう一度お試しください。', 'danger');
+      } else if (res.code === 'conflict') {
+        showToast('他の操作と同時に保存されたため反映できませんでした。もう一度お試しください。', 'danger');
       } else {
         showToast('保存に失敗しました。もう一度お試しください。', 'danger');
       }
@@ -1887,9 +1924,10 @@
   async function refreshFromServer() {
     if (busy) return;
     try {
-      var latest = await pullDb();
-      var changed = JSON.stringify(latest) !== JSON.stringify(DB);
-      DB = latest;
+      var pulled = await pullDb();
+      var changed = JSON.stringify(pulled.data) !== JSON.stringify(DB);
+      DB = pulled.data;
+      DB_ETAG = pulled.etag;
       if (changed && !hasOpenEditor() && !userIsTypingInField()) render();
     } catch (e) { /* オフライン等。次回のポーリングで再試行する */ }
   }
@@ -1910,7 +1948,9 @@
     session = loadSession();
     var bootFailed = false;
     try {
-      DB = await pullDb();
+      var pulled = await pullDb();
+      DB = pulled.data;
+      DB_ETAG = pulled.etag;
     } catch (e) {
       DB = emptyDb();
       bootFailed = true;
